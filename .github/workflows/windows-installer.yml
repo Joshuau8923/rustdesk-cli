@@ -1,0 +1,97 @@
+
+name: Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.3"
+          cache: true
+
+      - name: Test project
+        shell: pwsh
+        run: |
+          go test ./... -count=1 -timeout=120s
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
+
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw "Go vet failed." }
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $env:CGO_ENABLED = "0"
+
+          go build -trimpath -ldflags "-s -w" -o dist/rdcli.exe ./cmd/rdcli
+          if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+
+          & .\dist\rdcli.exe version
+          if ($LASTEXITCODE -ne 0) { throw "Version test failed." }
+
+          & .\dist\rdcli.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Help test failed." }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Package installer
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+
+          if (!(Test-Path $compiler)) {
+            $compiler = "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          }
+
+          if (!(Test-Path $compiler)) {
+            throw "Inno Setup compiler not found."
+          }
+
+          & $compiler installer/rdcli.iss
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installer packaging failed."
+          }
+
+          if (!(Test-Path dist/rdcli-setup.exe)) {
+            throw "Installer file was not generated."
+          }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdcli-windows-installer
+          path: dist/rdcli-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload standalone executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdcli-windows-portable
+          path: dist/rdcli.exe
+          if-no-files-found: error
+          retention-days: 14
