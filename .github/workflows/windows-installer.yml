@@ -1,73 +1,10 @@
 
-name: Windows Installer
-
-on:
-  workflow_dispatch:
-  push:
-    branches: [main]
-
-permissions:
-  contents: read
-
-concurrency:
-  group: windows-installer-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  test:
-    uses: ./.github/workflows/test.yml
-
-  build:
-    needs: test
-    runs-on: windows-2022
-    timeout-minutes: 30
-
-    env:
-      GOTOOLCHAIN: local
-      GOFLAGS: -mod=readonly
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Install Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.27.3"
-          cache: true
-
-      - name: Build Windows executable
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          $env:CGO_ENABLED = "0"
-
-          go build -trimpath -ldflags "-s -w" -o dist/rdcli.exe ./cmd/rdcli
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows executable build failed."
-          }
-
-          & .\dist\rdcli.exe version
-          if ($LASTEXITCODE -ne 0) {
-            throw "Version smoke test failed."
-          }
-
-          & .\dist\rdcli.exe --help | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "Help smoke test failed."
-          }
-
-      - name: Install Inno Setup
-        shell: pwsh
-        run: choco install innosetup --yes --no-progress
-
       - name: Package installer
         shell: pwsh
         run: |
-          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $ErrorActionPreference = "Stop"
 
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (!(Test-Path $compiler)) {
             $compiler = "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
           }
@@ -76,27 +13,31 @@ jobs:
             throw "Inno Setup compiler not found."
           }
 
-          & $compiler installer/rdcli.iss
-          if ($LASTEXITCODE -ne 0) {
-            throw "Installer packaging failed."
+          # Verify required files before packaging.
+          $requiredFiles = @(
+            "installer/rdcli.iss",
+            "dist/rdcli.exe",
+            "README.md",
+            "LICENSE"
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (!(Test-Path $file)) {
+              throw "Required file is missing: $file"
+            }
           }
 
-          if (!(Test-Path "dist/rdcli-setup.exe")) {
+          # Use absolute paths to avoid working-directory ambiguity.
+          $projectRoot = (Get-Location).Path
+          $scriptPath = Join-Path $projectRoot "installer\rdcli.iss"
+          $outputDir = Join-Path $projectRoot "dist"
+
+          & $compiler "/O$outputDir" $scriptPath
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE."
+          }
+
+          if (!(Test-Path (Join-Path $outputDir "rdcli-setup.exe"))) {
             throw "Installer file was not generated."
           }
-
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdcli-windows-installer
-          path: dist/rdcli-setup.exe
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload standalone executable
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdcli-windows-portable
-          path: dist/rdcli.exe
-          if-no-files-found: error
-          retention-days: 14
